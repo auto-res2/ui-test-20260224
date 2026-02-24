@@ -1,0 +1,48 @@
+# Standard Self-Consistency (SC) - Comparative Method 1
+# Model: Gemini, Dataset: GSM8K
+
+run_id: comparative-1-gemini-gsm8k
+
+method:
+  name: self_consistency
+  description: "Standard Self-Consistency with majority voting"
+  type: comparative
+  
+  # Generate K samples and use majority voting
+  candidate_generation:
+    k_gen: 20  # same total budget as SVEC (10 gen + 10 ver = 20)
+    max_steps: 8  # same constraint as SVEC for fair comparison
+    temperature: 0.7
+    max_output_tokens: 512
+    prompt_template: |
+      Solve this math problem step-by-step. Use at most {max_steps} numbered steps.
+      Show only essential computations. End with "Answer: <number>".
+      
+      Problem: {question}
+  
+  # No verification stage for standard SC
+  self_verification:
+    k_ver: 0
+  
+  # Simple majority voting
+  aggregation:
+    strategy: majority_vote
+
+model:
+  name: gemini-1.5-flash
+  provider: google
+  api_key_env: GEMINI_API_KEY
+
+dataset:
+  name: gsm8k
+  split: test
+  subset: main
+  dev_size: 40
+  eval_start: 40
+  eval_end: 200
+  
+inference:
+  mode: full
+  sanity_samples: 10
+  batch_size: 1
+  num_workers: 0

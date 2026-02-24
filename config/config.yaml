@@ -1,5 +1,5 @@
 # Main configuration for Hydra
-# This file will be populated by AI code generator based on experimental design
+# Self-Verified Efficient Consistency (SVEC) prompt tuning experiment
 
 defaults:
   - _self_
@@ -11,8 +11,11 @@ mode: main
 # Results output directory
 results_dir: .research/results
 
-# WandB configuration (will be set by AI agent)
+# WandB configuration
 wandb:
-  entity: ???
-  project: ???
+  entity: a
+  project: a
   mode: online
+
+# Cache directory for datasets and models
+cache_dir: .cache

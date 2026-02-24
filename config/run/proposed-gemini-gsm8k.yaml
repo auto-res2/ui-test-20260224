@@ -1,0 +1,65 @@
+# SVEC (Self-Verified Efficient Consistency) - Proposed Method
+# Model: Gemini, Dataset: GSM8K
+
+run_id: proposed-gemini-gsm8k
+
+method:
+  name: svec
+  description: "Self-Verified Efficient Consistency with two-stage prompting"
+  type: proposed
+  
+  # Stage 1: Candidate generation
+  candidate_generation:
+    k_gen: 10  # number of candidate solutions to generate
+    max_steps: 8  # constrain CoT to ≤N numbered steps
+    temperature: 0.7
+    max_output_tokens: 512
+    prompt_template: |
+      Solve this math problem step-by-step. Use at most {max_steps} numbered steps.
+      Show only essential computations. End with "Answer: <number>" and optionally "Confidence: <0-1>".
+      
+      Problem: {question}
+  
+  # Stage 2: Self-verification
+  self_verification:
+    k_ver: 10  # verify all candidates (set to same as k_gen)
+    temperature: 0.3
+    max_output_tokens: 256
+    prompt_template: |
+      Review this solution and check if it's correct. Restate 2-4 key invariants or constraints 
+      from the problem (units, arithmetic checks, logical consistency). Then output:
+      
+      ChecksPassed: <m>/<M>  (e.g., 3/4)
+      Contradiction: <yes/no>
+      Confidence: <0.0-1.0>
+      
+      Problem: {question}
+      Solution: {solution}
+  
+  # Stage 3: Weighted aggregation
+  aggregation:
+    alpha: 0.01  # length penalty weight
+    beta: 0.5    # confidence weight
+    gamma: 2.0   # pass rate weight
+    delta: 10.0  # contradiction penalty
+    epsilon: 1e-6  # numerical stability
+
+model:
+  name: gemini-1.5-flash
+  provider: google
+  api_key_env: GEMINI_API_KEY
+
+dataset:
+  name: gsm8k
+  split: test
+  subset: main
+  # Use first 200 items: 40 for dev (hyperparameter selection), 160 for eval
+  dev_size: 40
+  eval_start: 40
+  eval_end: 200
+  
+inference:
+  mode: full  # 'full' for main, will be overridden to 'sanity' in sanity_check mode
+  sanity_samples: 10  # number of samples to use in sanity_check mode
+  batch_size: 1
+  num_workers: 0
