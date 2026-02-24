@@ -163,5 +163,164 @@
     "experimental_code": "import re\nimport math\nfrom collections import defaultdict\n\nEPS = 1e-6\n\ndef parse_answer(text: str):\n    m = re.search(r\"Answer:\\s*([-+]?\\d+(?:\\.\\d+)?)\", text)\n    return m.group(1) if m else None\n\ndef parse_conf(text: str, default=0.5):\n    m = re.search(r\"Confidence:\\s*(0(?:\\.\\d+)?|1(?:\\.0+)?)\", text)\n    if not m:\n        return default\n    p = float(m.group(1))\n    return max(0.0, min(1.0, p))\n\ndef parse_checks(text: str):\n    \"\"\"Expected: 'ChecksPassed: m/M'\"\"\"\n    m = re.search(r\"ChecksPassed:\\s*(\\d+)\\s*/\\s*(\\d+)\", text)\n    if not m:\n        return 0, 0\n    return int(m.group(1)), int(m.group(2))\n\ndef parse_contradiction(text: str):\n    m = re.search(r\"Contradiction:\\s*(yes|no)\", text, flags=re.IGNORECASE)\n    if not m:\n        return 0\n    return 1 if m.group(1).lower() == \"yes\" else 0\n\ndef svec_aggregate(candidates, alpha=0.01, beta=0.5, gamma=1.0, delta=4.0):\n    \"\"\"candidates: list of dicts with keys:\n      - gen_text: generation containing Answer/optional Confidence\n      - ver_text: verification containing ChecksPassed/Contradiction/optional Confidence\n      - tokens: optional token count for gen_text\n    \"\"\"\n    vote = defaultdict(float)\n    for c in candidates:\n        ans = parse_answer(c.get(\"gen_text\", \"\"))\n        if ans is None:\n            continue\n\n        # features\n        length = c.get(\"tokens\", len(c.get(\"gen_text\", \"\").split()))\n\n        ver_text = c.get(\"ver_text\", \"\")\n        passed, total = parse_checks(ver_text)\n        r = (passed / total) if total > 0 else 0.0\n        contrad = parse_contradiction(ver_text)\n\n        # Prefer verifier confidence if present; else generation confidence; else default\n        p = parse_conf(ver_text, default=parse_conf(c.get(\"gen_text\", \"\"), default=0.5))\n\n        w = math.exp(-alpha * length + gamma * r + beta * math.log(p + EPS) - delta * contrad)\n        vote[ans] += w\n\n    if not vote:\n        return None\n    return max(vote.items(), key=lambda kv: kv[1])[0]\n\n# Integration note:\n# - Use your LLM API to produce K gen_text samples.\n# - For each gen_text, call a verification prompt that returns ver_text.\n# - Then call svec_aggregate(candidates, ...).",
     "expected_result": "On GSM8K (first 200 test items), with equal total call budget (20 calls/problem):\n- Zero-shot CoT (greedy): ~55% accuracy\n- SC majority (K=20): ~62% accuracy\n- HESC (length+confidence): ~64–66% accuracy\n- SVEC (proposed): ~66–69% accuracy (additional +2–3% abs over HESC; +4–7% over SC)\n\nEfficiency/stability expectations:\n- Mean rationale length: 20–35% shorter than standard SC prompts due to ≤N-step constraint.\n- Decision stability: final-answer agreement across 3 reruns increases by ~8–15 points vs SC (e.g., 0.70→0.80+).\n- Calibration (Brier): modest improvement vs HESC because pass-rate and contradiction signals reduce overconfident wrong paths (e.g., 0.20→0.18; lower is better).\n\nAblation predictions:\n- Removing verification term (γ=0) drops accuracy back toward HESC.\n- Using verification without contradiction penalty (δ=0) increases variance and slightly hurts stability.",
     "expected_conclusion": "SVEC provides a more novel and socially/academically valuable prompt-only CoT improvement by shifting from “more samples” to “human-like self-audit”: it operationalizes economy (short steps) and reliability (explicit checks and contradiction detection) within the self-consistency framework. Unlike confidence- or length-only weighting, SVEC uses a structured self-verification signal that is measurable, ablatable, and model-agnostic, improving correctness and stability while reducing token cost—beneficial for low-latency, lower-carbon deployments and for safer use in education/decision support where uncertainty and internal consistency matter."
+  },
+  "experimental_design": {
+    "experiment_summary": "Task: solve grade-school math word problems by generating a final numeric answer. We compare prompt-only inference strategies that sample multiple chain-of-thought (CoT) solutions and aggregate them.\n\nPurpose: demonstrate that Self-Verified Efficient Consistency (SVEC)—a two-stage, prompt-only method—improves (1) answer correctness, (2) token/latency cost, and (3) decision stability vs standard Self-Consistency (SC) under the same total model-call budget.\n\nWorkflow (per problem):\n1) Candidate generation: sample K_gen constrained-CoT solutions (≤N numbered steps, minimal computations, end with `Answer:` and optional `Confidence:`).\n2) Self-verification: for each candidate, run a cheap second prompt that forces the *same model* to restate 2–4 invariants and output structured fields: `ChecksPassed: m/M`, `Contradiction: yes/no`, `Confidence: p`.\n3) Aggregation: compute weights w_i = exp( -α·ℓ_i + γ·r_i + β·log(p_i+ε) - δ·c_i ) from length ℓ_i, pass rate r_i, confidence p_i, contradiction flag c_i, and pick the answer with maximum total weight.\n\nBaselines: a single comparative method (SC) with the same call budget.\n\nScale fit to Runner: use GSM8K test first 200 items, with a 40-item dev split for hyperparameter selection and 160-item held-out evaluation. Use K_gen=10 and K_ver=10 (20 total model calls/problem). This is small enough to run comfortably on the provided self-hosted GPU runner; although the model is API-served (Gemini), the runner is used for dataset handling, orchestration, caching, and analysis; total calls ≈ 200*20=4000 plus 40*grid-search calls. Token limits are controlled via ≤N-step prompting and max_output_tokens to keep latency/cost bounded.",
+    "runner_config": {
+      "runner_label": [
+        "self-hosted",
+        "gpu-runner"
+      ],
+      "description": "NVIDIA H200, VRAM: 140 GB, RAM: 240 GB"
+    },
+    "evaluation_metrics": [
+      {
+        "name": "accuracy",
+        "description": "Correctness criteria: A prediction is correct if the extracted final numeric answer matches the gold numeric answer from GSM8K after normalization. Normalization: (i) extract the last numeric value after the literal tag `Answer:`; (ii) remove commas and trailing punctuation; (iii) convert to float if possible; (iv) compare as integers if both are within 1e-9 of an integer, else compare floats with tolerance tol=1e-4 * max(1, |gold|). If extraction fails, mark incorrect.\n\nCalculation method: accuracy = (# correct examples) / (N examples).\n\nTask appropriateness: GSM8K is numeric word-problem solving; exact (or near-exact) numeric correctness is the primary objective.\n\nRelevant visualizations: bar chart of accuracy by method with 95% bootstrap CIs; per-item correctness agreement heatmap between methods (optional)."
+      },
+      {
+        "name": "mean_generation_tokens",
+        "description": "Correctness criteria: Not applicable (efficiency metric). Count tokens in the *generation* call output (candidate solution) using the provider’s token counter when available; otherwise approximate with a tokenizer (e.g., tiktoken-compatible) or whitespace proxy and report approximation method.\n\nCalculation method: mean_generation_tokens = (1/N) * sum_j mean_i tokens(gen_text_{j,i}) over candidates i for problem j. Also report mean tokens for the *selected* candidate.\n\nTask appropriateness: SVEC explicitly targets economical reasoning; token use is a direct proxy for cost/latency.\n\nRelevant visualizations: boxplot/violin of per-problem selected-generation tokens; scatter of tokens vs correctness."
+      },
+      {
+        "name": "decision_stability",
+        "description": "Correctness criteria: Not applicable (stability metric). Run the full method R=3 times with different random seeds/temperatures (keeping prompts and budgets fixed). For each problem, collect the final predicted answer from each run.\n\nCalculation method: stability = (1/N) * sum_j I[ all R predictions are identical after numeric normalization ]. Also report pairwise agreement: avg over pairs (r1,r2) of I[pred_{j,r1}=pred_{j,r2}].\n\nTask appropriateness: Hypothesis targets reduced answer flipping across samples/runs; this measures robustness.\n\nRelevant visualizations: histogram of per-problem agreement counts (0..R); paired method comparison of stability with bootstrap CIs."
+      },
+      {
+        "name": "brier_score_selected",
+        "description": "Correctness criteria: Uses correctness as binary outcome y∈{0,1}. Confidence p is taken from the *selected* answer’s verification output (`Confidence: p`), else from generation output, else default 0.5. p is clipped to [0,1].\n\nCalculation method: Brier = (1/N) * sum_j (p_j - y_j)^2 (lower is better).\n\nTask appropriateness: SVEC uses tempered confidence; calibration matters for reliable decision-making.\n\nRelevant visualizations: reliability diagram (confidence bins vs empirical accuracy); histogram of p for correct vs incorrect; Brier by method with CIs."
+      },
+      {
+        "name": "verification_usefulness_correlation",
+        "description": "Correctness criteria: Not applicable (diagnostic). For each candidate, define r_i = m_i/M_i from `ChecksPassed`. Define correctness z_i ∈ {0,1} as whether that candidate’s `Answer:` matches gold after normalization.\n\nCalculation method: compute Spearman ρ between r_i and z_i across all candidates pooled (or per-problem then averaged). Also report AUC where r_i is a score for predicting z_i.\n\nTask appropriateness: Validates that the self-verification signal is informative and not redundant with length/confidence.\n\nRelevant visualizations: calibration-style plot of candidate correctness vs binned pass-rate; ROC curve using r_i as score."
+      }
+    ],
+    "models_to_use": [
+      "gemini-2.5-pro (params unknown)"
+    ],
+    "datasets_to_use": [
+      "GSM8K"
+    ],
+    "proposed_method": {
+      "method_name": "SVEC (Self-Verified Efficient Consistency)",
+      "description": "Prompt-only, model-agnostic two-stage self-consistency: sample short constrained CoTs, then elicit a structured self-verification (invariants, checks passed, contradiction flag, confidence) from the same model. Aggregate via a length+verification+tempered-confidence weighted vote with explicit contradiction penalty to improve correctness, efficiency, and decision stability without fine-tuning or external verifiers.",
+      "optuna_config": {
+        "enabled": true,
+        "n_trials": 20,
+        "search_spaces": [
+          {
+            "param_name": "alpha",
+            "distribution_type": "categorical",
+            "choices": [
+              0,
+              0.005,
+              0.01
+            ]
+          },
+          {
+            "param_name": "beta",
+            "distribution_type": "categorical",
+            "choices": [
+              0,
+              0.5,
+              1.0
+            ]
+          },
+          {
+            "param_name": "gamma",
+            "distribution_type": "categorical",
+            "choices": [
+              0,
+              1,
+              2
+            ]
+          },
+          {
+            "param_name": "delta",
+            "distribution_type": "categorical",
+            "choices": [
+              0,
+              2,
+              4
+            ]
+          },
+          {
+            "param_name": "N_steps",
+            "distribution_type": "categorical",
+            "choices": [
+              4,
+              6,
+              8
+            ]
+          },
+          {
+            "param_name": "temperature_gen",
+            "distribution_type": "categorical",
+            "choices": [
+              0.6,
+              0.8,
+              1.0
+            ]
+          },
+          {
+            "param_name": "top_p_gen",
+            "distribution_type": "categorical",
+            "choices": [
+              0.9,
+              0.95,
+              1.0
+            ]
+          }
+        ]
+      }
+    },
+    "comparative_methods": [
+      {
+        "method_name": "Self-Consistency (SC) Majority Vote",
+        "description": "Standard prompt-only self-consistency: sample K independent CoT solutions and choose the most frequent normalized final answer (unweighted majority/plurality). Uses the same total model-call budget as SVEC by setting K=20 direct generations and no verification step.",
+        "optuna_config": {
+          "enabled": true,
+          "n_trials": 20,
+          "search_spaces": [
+            {
+              "param_name": "K",
+              "distribution_type": "categorical",
+              "choices": [
+                10,
+                20,
+                30
+              ]
+            },
+            {
+              "param_name": "temperature",
+              "distribution_type": "categorical",
+              "choices": [
+                0.6,
+                0.8,
+                1.0
+              ]
+            },
+            {
+              "param_name": "top_p",
+              "distribution_type": "categorical",
+              "choices": [
+                0.9,
+                0.95,
+                1.0
+              ]
+            },
+            {
+              "param_name": "N_steps",
+              "distribution_type": "categorical",
+              "choices": [
+                4,
+                6,
+                8
+              ]
+            }
+          ]
+        }
+      }
+    ]
   }
 }
